@@ -207,6 +207,8 @@ class Interp:
             return (a[2], None)
         if k == "result":
             return env["result"]
+        if k == "expr":
+            return self.expr(a[1], env)
         raise AssertionError(a)
 
     # ------------------------------------------------------------ units
@@ -296,6 +298,9 @@ class Interp:
         if k == "atom":
             return self.atom(e[1], env)
         if k == "binop":
+            if e[1] in ("and", "or"):       # the right side is only looked at when it matters
+                left = self.atom(e[2], env)
+                return left if left == (e[1] == "or") else self.atom(e[3], env)
             return self.binop(e[1], self.atom(e[2], env), self.atom(e[3], env))
         if k == "not":
             return not self.atom(e[1], env)

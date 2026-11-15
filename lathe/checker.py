@@ -40,15 +40,17 @@ class Verdict:
     line: int
     definition: Optional[str] = None
     label: Optional[str] = None
+    source: str = ""
 
     def render(self) -> str:
         where = " ".join(x for x in (self.definition, self.label) if x)
         head = f"! {self.code} line {self.line}" + (f" in {where}" if where else "") + f": {self.message}"
-        return "\n".join([head] + [f"  fix: {f}" for f in self.fixes])
+        at = [f"  at: {self.source}"] if self.source else []
+        return "\n".join([head] + at + [f"  fix: {f}" for f in self.fixes])
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "line": self.line, "definition": self.definition,
-                "label": self.label, "message": self.message, "fixes": self.fixes}
+        return {"code": self.code, "line": self.line, "definition": self.definition, "label": self.label,
+                "source": self.source, "message": self.message, "fixes": self.fixes}
 
 
 @dataclass
@@ -178,16 +180,22 @@ def _near(word: str, candidates) -> list:
 
 def _plain_name(tok: tuple, what: str) -> str:
     kind, val = tok
-    if kind != "name" or "." in val or val in KEYWORDS:
+    if kind == "name" and val in KEYWORDS:
+        raise Err("E-SYNTAX", f"`{val}` is a reserved word and cannot be used as a name",
+                  [f"choose another name, for example `{val}_value`"])
+    if kind != "name" or "." in val:
         shown = f"`{_tok(tok)}`" if val is not None else "the end of the line"
         raise Err("E-SYNTAX", f"expected {what}, found {shown}",
-                  ["names are lower-case words such as `total` or `word_count`, and may not be Lathe keywords"])
+                  ["names are lower-case words such as `total` or `word_count`"])
     return val
 
 
 class Session:
-    def __init__(self, interactive: bool = False, run_examples: bool = True):
+    def __init__(self, interactive: bool = False, run_examples: bool = True, nested: bool = False):
         self.prog = Program()
+        self.nested = nested            # syntax variant: allow parenthesised, nested expressions
+        self._fall = False              # did the line being checked contain something that can fault
+        self._allow_result = False
         self.interactive = interactive
         self.run_examples = run_examples
         self.cur = None            # definition being written: Record | Choice | Unit
@@ -198,9 +206,10 @@ class Session:
 
     # ------------------------------------------------------------ driving
 
-    def feed(self, line: str) -> list:
+    def feed(self, line: str, lineno: Optional[int] = None) -> list:
         """Check one line. Returns the verdicts it produced (empty means accepted)."""
-        self.lineno += 1
+        self.lineno = lineno if lineno is not None else self.lineno + 1
+        self._fall = self._allow_result = False
         label = snapshot = None
         try:
             toks = lex(line)
@@ -221,11 +230,11 @@ class Session:
             err = e
         if self.interactive:
             self.cur = snapshot
-        return [self._fault(err, label)]
+        return [self._fault(err, label, line.strip())]
 
-    def _fault(self, err: Err, label: Optional[str]) -> Verdict:
+    def _fault(self, err: Err, label: Optional[str], source: str = "") -> Verdict:
         name = self.cur.name if self.cur is not None else None
-        v = Verdict(err.code, err.message, err.fixes, self.lineno, name, label)
+        v = Verdict(err.code, err.message, err.fixes, self.lineno, name, label, source)
         self.verdicts.append(v)
         if not self.interactive and self.cur is not None:
             self.prog.poisoned.add(self.cur.name)
@@ -502,6 +511,17 @@ class Session:
     def _condition(self, c: Cur, allow_result: bool, subst: Optional[dict] = None, stop: tuple = ()) -> tuple:
         """`VALUE` or `VALUE COMPARISON VALUE`, of type bool."""
         subst = {} if subst is None else subst
+        if self.nested:
+            self._allow_result = allow_result
+            e, t = self._expr(c, subst, stop, 0)
+            self._allow_result = False
+            if not c.at_end() and c.peek()[1] not in stop:
+                raise Err("E-SYNTAX", f"unexpected `{_tok(c.peek())}` after the condition")
+            if self._fall:
+                raise Err("E-FAULT", "a condition cannot hold something that can fault",
+                          ["bind it in its own step with `else give fault` or `else VALUE`, then use the name"])
+            self._unify(t, T.BOOL, subst, "condition")
+            return e
         left, lt = self._atom(c, subst, allow_result=allow_result)
         if c.at_end() or c.peek()[1] in stop:
             self._unify(lt, T.BOOL, subst, "condition")
@@ -571,6 +591,13 @@ class Session:
             if not u.fallible:
                 raise Err("E-FAULT", "this unit cannot fault", ["change the header to `gives TYPE or fault`"])
             step = Step(label, "give_fault", self.lineno, code=code)
+        elif self.nested:
+            e, t = self._expr(c, subst, ("when",), 0)
+            if self._fall:
+                raise Err("E-FAULT", "`give` cannot hold something that can fault",
+                          ["bind it in its own step with `else give fault` or `else VALUE`, then give the name"])
+            self._unify(t, u.ret, subst, "`give`")
+            step = Step(label, "give", self.lineno, expr=e)
         else:
             atom, t = self._atom(c, subst)
             if not c.at_end() and not c.is_word("when"):
@@ -607,7 +634,7 @@ class Session:
             u.pending = {"label": label, "name": name, "atom": atom, "cases": cases, "arms": [],
                          "result": result, "subst": subst, "line": self.lineno}
             return
-        if c.is_word("when"):
+        if c.is_word("when") and not self.nested:
             c.next()
             cond = self._condition(c, False, subst, stop=("then",))
             c.expect("then", "after the `when` condition")
@@ -680,6 +707,8 @@ class Session:
 
     def _handler(self, c: Cur, subst: dict, t: tuple, fallible: bool) -> Optional[tuple]:
         u = self.cur
+        fallible = fallible or self._fall
+        self._fall = False
         if not c.is_word("else"):
             if fallible:
                 fixes = ["add `else give fault` to pass the fault to this unit's caller"
@@ -714,12 +743,23 @@ class Session:
             return ("lit", val), T.INT
         if kind == "string":
             return ("lit", val), T.TEXT
+        if kind == "op" and val == "(":
+            if not self.nested:
+                raise Err("E-SYNTAX", "Lathe has no parentheses: a step applies one operation to plain values",
+                          ["compute the inner part in its own step, give it a name, and use the name here"])
+            e, t = self._expr(c, subst, (), 0)
+            c.expect(")", "to close the parenthesis")
+            return self._as_atom(e), t
         if kind == "op" and val == "[":
             items, elem = [], T.fresh()
             while not c.accept("]"):
                 if items:
                     c.expect(",", "between list items")
-                item, it = self._atom(c, subst, literal_only, allow_result)
+                if self.nested and not literal_only:
+                    e, it = self._expr(c, subst, (), 0)
+                    item = self._as_atom(e)
+                else:
+                    item, it = self._atom(c, subst, literal_only, allow_result)
                 self._unify(it, elem, subst, "list item")
                 items.append(item)
             return ("list", items), ("seq", elem)
@@ -728,9 +768,7 @@ class Session:
                 return ("lit", val == "true"), T.BOOL
             if val == "nothing":
                 return ("lit", None), T.NOTHING
-            if val == "result":
-                if not allow_result:
-                    raise Err("E-NAME", "`result` can only be used in an `ensure` line")
+            if val == "result" and (allow_result or self._allow_result):
                 return ("result",), u.ret
             if literal_only:
                 raise Err("E-SYNTAX", f"only literal values are allowed here, not `{val}`",
@@ -796,16 +834,77 @@ class Session:
             return ["read a choice with `match`"]
         return []
 
+    PREC = {"or": 1, "and": 2, "==": 3, "!=": 3, "<": 3, "<=": 3, ">": 3, ">=": 3,
+            "+": 4, "-": 4, "*": 5, "/": 5, "%": 5}
+
+    @staticmethod
+    def _as_atom(e: tuple) -> tuple:
+        return e[1] if e[0] == "atom" else ("expr", e)
+
+    def _expr(self, c: Cur, subst: dict, stop: tuple, minp: int):
+        """Nested variant: a full expression with the usual precedence. Returns (expr, type)."""
+        left, lt, fallible = self._operand(c, subst, stop)
+        self._fall = self._fall or fallible
+        while True:
+            k, v = c.peek()
+            if c.at_end() or v in stop or k == "string" or v not in self.PREC or self.PREC[v] < minp:
+                return left, lt
+            c.next()
+            right, rt = self._expr(c, subst, stop, self.PREC[v] + 1)
+            lt = self._binop_type(v, lt, rt, subst)
+            left = ("binop", v, self._as_atom(left), self._as_atom(right))
+
     def _simple(self, c: Cur, subst: dict, stop: tuple = ()):
-        """One operation applied to plain values. Returns (expr, type, fallible)."""
+        """Flat variant: one operation applied to plain values. Returns (expr, type, fallible)."""
+        if self.nested:
+            e, t = self._expr(c, subst, stop, 0)
+            return e, t, False
+        left, lt, fallible = self._operand(c, subst, stop)
+        if left[0] != "atom":
+            return left, lt, fallible
+        left = left[1]
+        k2, v2 = c.peek()
+        if c.at_end() or v2 in stop:
+            return ("atom", left), lt, False
+        if v2 not in BINOPS or k2 == "string":
+            hint = []
+            if v2 == "=":
+                hint = ["equality is written `==`"]
+            elif left[0] == "name":
+                hint = [f"`{left[1]}` is a value, not an operation; to call a unit or operation put its name first"]
+            raise Err("E-SYNTAX", f"unexpected `{_tok((k2, v2))}` after a value", hint
+                      + ["a step holds one operation; split larger expressions into several steps"])
+        c.next()
+        right, rt = self._atom(c, subst)
+        if not c.at_end() and c.peek()[1] not in stop:
+            raise Err("E-SYNTAX", f"a step holds one operation; found more after `{_tok(c.t[c.i - 1])}`",
+                      ["give the first part a name in its own step, then use that name"])
+        return ("binop", v2, left, right), self._binop_type(v2, lt, rt, subst), False
+
+    def _operand(self, c: Cur, subst: dict, stop: tuple = ()):
+        """A call, constructor, `not`, or plain value. Returns (expr, type, fallible)."""
         u = self.cur
         kind, val = c.peek()
         if kind == "name":
             if val == "not":
                 c.next()
-                atom, t = self._atom(c, subst)
+                if self.nested:
+                    e, t = self._expr(c, subst, stop, 3)
+                    atom = self._as_atom(e)
+                else:
+                    atom, t = self._atom(c, subst)
                 self._unify(t, T.BOOL, subst, "`not`")
                 return ("not", atom), T.BOOL, False
+            if val == "when" and self.nested:
+                c.next()
+                cond, ct = self._expr(c, subst, ("then",), 0)
+                self._unify(ct, T.BOOL, subst, "`when` condition")
+                c.expect("then", "after the `when` condition")
+                a, at = self._expr(c, subst, stop + ("else",), 0)
+                c.expect("else", "after the `then` value")
+                b, bt = self._expr(c, subst, stop + ("else",), 0)
+                self._unify(bt, at, subst, "`else` value")
+                return ("when", cond, a, b), at, False
             if val == "new":
                 c.next()
                 return self._new(c, subst)
@@ -830,7 +929,7 @@ class Session:
                         raise Err("E-NAME", f"choice `{head}` has no case `{case}`", ["cases are: " + ", ".join(cases)])
                     if cases[case] is not None:
                         c.next()
-                        if c.at_end() or c.peek()[1] in stop:
+                        if c.at_end() or c.peek()[1] in stop or c.peek()[1] == ")":
                             raise Err("E-ARITY", f"`{val}` carries a `{T.show(cases[case])}`", [f"write `{val} VALUE`"])
                         atom, t = self._atom(c, subst)
                         self._unify(t, cases[case], subst, f"value of `{val}`")
@@ -838,23 +937,7 @@ class Session:
                 elif head in self.prog.records and "." not in val:
                     raise Err("E-SYNTAX", f"`{val}` is a record type", [f"build one with `new {val} FIELD = VALUE, ...`"])
         left, lt = self._atom(c, subst)
-        k2, v2 = c.peek()
-        if c.at_end() or v2 in stop:
-            return ("atom", left), lt, False
-        if v2 not in BINOPS or k2 == "string":
-            hint = []
-            if v2 == "=":
-                hint = ["equality is written `==`"]
-            elif left[0] == "name":
-                hint = [f"`{left[1]}` is a value, not an operation; to call a unit or operation put its name first"]
-            raise Err("E-SYNTAX", f"unexpected `{_tok((k2, v2))}` after a value", hint
-                      + ["a step holds one operation; split larger expressions into several steps"])
-        c.next()
-        right, rt = self._atom(c, subst)
-        if not c.at_end() and c.peek()[1] not in stop:
-            raise Err("E-SYNTAX", f"a step holds one operation; found more after `{_tok(c.t[c.i - 1])}`",
-                      ["give the first part a name in its own step, then use that name"])
-        return ("binop", v2, left, right), self._binop_type(v2, lt, rt, subst), False
+        return ("atom", left), lt, False
 
     def _binop_type(self, op_: str, lt: tuple, rt: tuple, subst: dict) -> tuple:
         lt, rt = T.resolve(lt, subst), T.resolve(rt, subst)
@@ -878,7 +961,9 @@ class Session:
     def _args(self, c: Cur, subst: dict, stop: tuple) -> list:
         args = []
         while not c.at_end() and c.peek()[1] not in stop:
-            if c.peek()[0] == "op" and c.peek()[1] not in ("[",):
+            if self.nested and c.peek()[0] != "string" and (c.peek()[1] in self.PREC or c.peek()[1] in (")", ",", "]")):
+                break
+            if c.peek()[0] == "op" and c.peek()[1] not in ("[", "("):
                 raise Err("E-SYNTAX", f"unexpected `{c.peek()[1]}` among the inputs of an operation",
                           ["a step holds one operation; compute each input in its own step first"])
             args.append(self._atom(c, subst))
@@ -904,6 +989,7 @@ class Session:
         self._constraints(b, mapping, subst)
         if b.effect:
             self._use_effect(b.effect)
+        self._fall = self._fall or fallible
         return ("builtin", b.name, [a for a, _ in args], with_unit, with_args), T.instantiate(b.ret, mapping), fallible
 
     def _with(self, c: Cur, subst: dict, handed: list, want_ret: tuple, stop: tuple, opname: str):
@@ -964,12 +1050,14 @@ class Session:
         if w is u:
             if not u.shrinks:
                 raise Err("E-SHRINKS", "a unit that calls itself must say which input gets smaller each time",
-                          ["add a header line `shrinks INPUT` (an int that decreases toward 0, or a text/seq that gets shorter)"])
+                          ["add a header line `shrinks INPUT` after `gives` (INPUT is an int that decreases toward 0, or a text/seq that gets shorter, in every self-call)",
+                           "if no input always gets smaller, add an extra int input that counts down, or use `repeat ... limit N`"])
             u.calls_self = True
         else:
             for eff in w.needs:
                 self._use_effect(eff)
             u.deps.add(name)
+        self._fall = self._fall or w.fallible
         return ("call", name, [a for a, _ in args]), w.ret, w.fallible
 
     def _use_effect(self, eff: str):
@@ -1010,6 +1098,7 @@ class Session:
             raise Err("E-SYNTAX", "`repeat` must state the most rounds it may take", [f"form: `{form}`"])
         limit, lt = self._atom(c, subst)
         self._unify(lt, T.INT, subst, "`limit`")
+        self._fall = True
         return ("repeat", state, name, extras, limit), result, True
 
     # ------------------------------------------------------------ closing a unit
@@ -1071,9 +1160,56 @@ class Session:
         return h.hexdigest()[:12]
 
 
-def check_source(source: str, run_examples: bool = True) -> Session:
-    s = Session(run_examples=run_examples)
-    for line in source.splitlines():
-        s.feed(line)
+def _ordered(lines: list) -> list:
+    """Order whole definitions so that each comes after the definitions it mentions.
+
+    A file may list definitions in any order; the checker itself still never looks forward.
+    Returns [(line number, text)]. Definitions in a cycle keep their written order.
+    """
+    chunks, current = [], None           # chunk: [name, [(lineno, text)], mentioned names]
+    for no, text in enumerate(lines, 1):
+        try:
+            toks = lex(text)
+        except LexError:
+            toks = []
+        words = {str(v).split(".")[0] for k, v in toks if k == "name"}
+        starts = len(toks) == 2 and toks[0][1] in ("record", "choice", "unit") and toks[0][0] == "name"
+        if starts or current is None:
+            current = [toks[1][1] if starts else None, [], set()]
+            chunks.append(current)
+        current[1].append((no, text))
+        current[2] |= words
+        if toks[:1] == [("name", "end")]:
+            current = None
+    by_name = {}
+    for ch in chunks:
+        if ch[0] is not None:
+            by_name.setdefault(ch[0], ch)
+    out, state = [], {}
+
+    def visit(ch):
+        key = id(ch)
+        if state.get(key):
+            return
+        state[key] = 1
+        for name in sorted(ch[2], key=lambda n: by_name[n][1][0][0] if n in by_name else 0):
+            dep = by_name.get(name)
+            if dep is not None and dep is not ch:
+                visit(dep)
+        out.extend(ch[1])
+
+    for ch in chunks:
+        visit(ch)
+    return out
+
+
+def check_source(source: str, run_examples: bool = True, nested: bool = False) -> Session:
+    s = Session(run_examples=run_examples, nested=nested)
+    last = 0
+    for no, text in _ordered(source.splitlines()):
+        s.feed(text, no)
+        last = max(last, no)
+    s.lineno = last
     s.finish()
+    s.verdicts.sort(key=lambda v: v.line)
     return s

@@ -13,9 +13,12 @@ from .interp import Grant, Interp, Runtime, big_stack, fmt
 from .lexer import lex
 
 
+NESTED = False      # set from --nested: the syntax variant with nested expressions
+
+
 def _load(path: str) -> Session:
     with open(path, encoding="utf-8") as fh:
-        return check_source(fh.read())
+        return check_source(fh.read(), nested=NESTED)
 
 
 def cmd_check(a) -> int:
@@ -124,7 +127,7 @@ def answer(session: Session, question: str) -> str:
 
 def cmd_session(a) -> int:
     """Line-by-line dialogue: each line gets `ok`, a verdict, or an answer."""
-    s = Session(interactive=True)
+    s = Session(interactive=True, nested=NESTED)
     if a.file:
         with open(a.file, encoding="utf-8") as fh:
             for line in fh:
@@ -151,11 +154,16 @@ def cmd_ask(a) -> int:
     return 0
 
 
-def primer_text() -> str:
-    """The hand-written primer plus the vocabulary generated from the built-in table."""
+def primer_text(nested: bool = False) -> str:
+    """The hand-written primer for one syntax variant, plus the vocabulary generated from the built-in table."""
+    import re
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "primer.md")
     with open(path, encoding="utf-8") as fh:
-        text = fh.read().rstrip() + "\n\n## Vocabulary\n\n"
+        text = fh.read()
+    keep, drop = ("nested", "flat") if nested else ("flat", "nested")
+    text = re.sub(rf"<!-- {drop} -->.*?<!-- /{drop} -->\n?", "", text, flags=re.S)
+    text = re.sub(rf"<!-- /?{keep} -->\n?", "", text)
+    text = text.rstrip() + "\n\n## Vocabulary\n\n"
     text += ("Every built-in operation. `A B K V S R` stand for any type. `UNIT[X -> Y]` after `with` is a unit\n"
              "or operation that is handed X (plus any extra inputs you list) and gives Y.\n\n```\n")
     from .builtins import BUILTINS
@@ -165,12 +173,13 @@ def primer_text() -> str:
 
 
 def cmd_primer(a) -> int:
-    sys.stdout.write(primer_text())
+    sys.stdout.write(primer_text(a.nested))
     return 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="lathe", description="Lathe: checker and reference interpreter")
+    ap.add_argument("--nested", action="store_true", help="syntax variant: allow parenthesised, nested expressions")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("check", help="check a program and print verdicts")
@@ -200,6 +209,8 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_primer)
 
     a = ap.parse_args(argv)
+    global NESTED
+    NESTED = a.nested
     return big_stack(a.fn, a)
 
 

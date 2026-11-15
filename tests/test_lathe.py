@@ -473,3 +473,77 @@ class Formatting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Variants(unittest.TestCase):
+    def nested(self, src):
+        return check_source(textwrap.dedent(src), nested=True)
+
+    def test_definitions_may_come_in_any_order(self):
+        src = """
+        unit top
+          why "uses a helper written below"
+          takes n : int
+          gives int
+          example 2 gives 5
+          s0: m = helper n
+          s1: give m
+        end top
+        unit helper
+          why "double and add one"
+          takes n : int
+          gives int
+          s0: d = n * 2
+          s1: out = d + 1
+          s2: give out
+        end helper
+        """
+        self.assertEqual(codes(src), [])
+
+    def test_header_words_and_result_are_usable_names(self):
+        self.assertEqual(codes(unit("s0: result = n + 1\ns1: gives = result * 2\ns2: give gives")), [])
+        v = check(unit("s0: limit = n + 1\ns1: give limit")).verdicts[0]
+        self.assertIn("reserved word", v.message)
+
+    def test_flat_rejects_parentheses(self):
+        self.assertEqual(codes(unit("s0: m = (n + 1) * 2\ns1: give m")), ["E-SYNTAX"])
+
+    def test_nested_expressions(self):
+        src = unit("""
+            s0: m = (n + 1) * 2 - n % 3
+            s1: big = when m > 10 and not (n == 0) then int.max m 100 else 0 - m
+            s2: xs = [m, big, n * n]
+            s3: give seq.length xs + seq.sum xs when n > 0
+            s4: give when n == 0 then -1 else int.abs (n - 1)
+        """, "takes n : int\n  gives int\n  example 5 gives 28\n  example 7 gives 167\n  example 0 gives -1\n  example -3 gives 4")
+        s = self.nested(src)
+        self.assertEqual([v.render() for v in s.verdicts], [])
+
+    def test_nested_and_or_skip_the_right_side(self):
+        src = unit("s0: give n != 0 and 10 / n > 1", "takes n : int\n  gives bool\n  example 0 gives false\n  example 5 gives true")
+        self.assertEqual(self.nested(src).verdicts, [])
+
+    def test_nested_faults_still_need_handling(self):
+        base = "takes t : text\n  gives int or fault"
+        self.assertEqual([v.code for v in self.nested(unit("s0: n = int.parse t + 1\ns1: give n", base)).verdicts], ["E-FAULT"])
+        self.assertEqual(self.nested(unit("s0: n = int.parse t + 1 else give fault\ns1: give n", base)).verdicts, [])
+        self.assertEqual([v.code for v in self.nested(unit("s0: give int.parse t", base)).verdicts], ["E-FAULT"])
+
+
+class Primer(unittest.TestCase):
+    def test_every_program_in_the_primer_checks(self):
+        from lathe.cli import primer_text
+        import re
+        for nested in (False, True):
+            text = primer_text(nested)
+            blocks = [b for b in re.findall(r"```\n(.*?)```", text, re.S) if re.match(r"(record|choice|unit) \w+\n  ", b)]
+            self.assertGreaterEqual(len(blocks), 2)
+            for block in blocks:
+                s = check_source(block, nested=nested)
+                self.assertEqual([v.render() for v in s.verdicts], [], block)
+
+    def test_variants_differ_only_where_marked(self):
+        from lathe.cli import primer_text
+        self.assertIn("no parentheses", primer_text(False))
+        self.assertNotIn("no parentheses", primer_text(True))
+        self.assertNotIn("<!--", primer_text(False) + primer_text(True))

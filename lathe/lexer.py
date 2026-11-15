@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import re
 
+# Words that can never be used as names. Header words (why, takes, gives, ...) and
+# `result` are only special in their own position, so they stay usable as names.
 KEYWORDS = {
-    "record", "choice", "unit", "end", "why", "takes", "gives", "needs", "shrinks",
-    "require", "ensure", "example", "give", "check", "do", "when", "then", "else",
+    "record", "choice", "unit", "end", "give", "check", "do", "when", "then", "else",
     "match", "on", "with", "new", "repeat", "limit", "fault", "or", "and", "not",
-    "of", "to", "true", "false", "nothing", "result",
+    "true", "false", "nothing",
 }
 
 BINOPS = {"+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or"}
@@ -20,7 +21,7 @@ _TOKEN = re.compile(
   | (?P<string>"(?:[^"\\]|\\.)*")
   | (?P<int>\d[\d_]*)
   | (?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)
-  | (?P<op>==|!=|<=|>=|[-+*/%<>=:,\[\]])
+  | (?P<op>==|!=|<=|>=|[-+*/%<>=:,\[\]()])
     """,
     re.VERBOSE,
 )
@@ -67,7 +68,7 @@ def lex(line: str) -> list:
             # whitespace (or an opening bracket/comma/line start) before it.
             if tokens and tokens[-1] == ("op", "-") and line[m.start() - 1] == "-":
                 before = line[m.start() - 2] if m.start() >= 2 else " "
-                if before in " \t[,":
+                if before in " \t[,(":
                     tokens.pop()
                     n = -n
             tokens.append(("int", n))
