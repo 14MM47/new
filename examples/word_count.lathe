@@ -1,0 +1,38 @@
+-- count how often each word occurs in a file, most frequent first
+unit neg_count
+  why "sort key: more frequent entries first"
+  takes e : pair of text and int
+  gives int
+  s0: k = 0 - e.second
+  s1: give k
+end neg_count
+
+unit show_entry
+  why "format one (word, count) entry as a line"
+  takes e : pair of text and int
+  gives text
+  s0: n = int.to_text e.second
+  s1: line = text.join [e.first, n] " "
+  s2: give line
+end show_entry
+
+unit main
+  why "print word frequencies of the file named by the first argument"
+  takes args : seq of text
+  gives nothing or fault
+  needs console write, files read
+  s0: first = seq.first args
+  s1: path = match first
+      on some p then p
+      on none then ""
+  s2: give fault "usage" when path == ""
+  s3: raw = files.read_text path else give fault
+  s4: words = text.split_words raw
+  s5: lowered = seq.each words with text.lower
+  s6: counts = seq.tally lowered
+  s7: entries = map.entries counts
+  s8: sorted = seq.sort_by entries with neg_count
+  s9: lines = seq.each sorted with show_entry
+  s10: do seq.visit lines with console.write
+  s11: give nothing
+end main
