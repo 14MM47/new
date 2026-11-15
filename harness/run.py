@@ -59,9 +59,14 @@ print(repr({"results": out}))
 """
 
 
-def extract(text: str) -> str:
-    blocks = re.findall(r"```[a-zA-Z0-9_+-]*\n(.*?)```", text, re.S)
-    return max(blocks, key=len) if blocks else text
+def extract(text: str, lang: str) -> str:
+    """The program in a reply: the last fenced block that looks like a program."""
+    blocks = re.findall(r"```[^\n`]*\n(.*?)```", text, re.S)
+    looks = r"^\s*def \w+" if lang == "python" else r"^\s*(unit|record|choice) \w+\s*$"
+    good = [b for b in blocks if re.search(looks, b, re.M)]
+    if good:
+        return good[-1]
+    return blocks[-1] if blocks else text
 
 
 def prompt_for(task, lang: str) -> str:
@@ -151,7 +156,7 @@ def attempt(task, lang: str, model: str, rounds: int) -> dict:
         except Exception as e:
             rec["error"] = str(e)[:300]
             break
-        code = extract(reply["text"])
+        code = extract(reply["text"], lang)
         result = evaluate(task, lang, code)
         rec["rounds"].append({"code": code, **{k: reply[k] for k in ("prompt_tokens", "visible_tokens", "output_tokens")},
                               **result})

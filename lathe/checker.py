@@ -106,6 +106,7 @@ class Unit:
     done: bool = False
     calls_self: bool = False
     pending: Optional[dict] = None
+    subst: dict = field(default_factory=dict)     # types still being worked out across steps
 
 
 class Program:
@@ -125,8 +126,6 @@ class Program:
             return "choice"
         if name in self.units:
             return "unit"
-        if name in NAMESPACES:
-            return "built-in namespace"
         return None
 
 
@@ -236,10 +235,11 @@ class Session:
         name = self.cur.name if self.cur is not None else None
         v = Verdict(err.code, err.message, err.fixes, self.lineno, name, label, source)
         self.verdicts.append(v)
-        if not self.interactive and self.cur is not None:
-            self.prog.poisoned.add(self.cur.name)
+        if not self.interactive:
+            if self.cur is not None:
+                self.prog.poisoned.add(self.cur.name)
+            self.skipping = name or True
             self.cur = None
-            self.skipping = True
         return v
 
     def finish(self) -> list:
@@ -275,11 +275,9 @@ class Session:
             return [f"end {c.name}"]
         out = []
         if not c.steps:
-            if c.why is None:
-                return ["why \"...\""]
             if c.ret is None:
-                return ["takes NAME : TYPE", "gives TYPE", "gives TYPE or fault"]
-            out = [h + " ..." for h in HEADER_ORDER[max(c.stage, 3):]]
+                return ["why \"...\"", "takes NAME : TYPE", "gives TYPE", "gives TYPE or fault"]
+            out = [h + " ..." for h in HEADER_ORDER[3:]]
         return out + ["LABEL: NAME = ...", "LABEL: give ...", "LABEL: check ...", "LABEL: do ..."]
 
     # ------------------------------------------------------------ dispatch
@@ -287,10 +285,11 @@ class Session:
     def _line(self, toks: list, raw: str):
         first = toks[0][1] if toks[0][0] == "name" else None
         if self.skipping:
-            if first in ("record", "choice", "unit"):
+            # skip the rest of a faulty definition: up to its own `end`, or the next definition
+            if first in ("record", "choice", "unit") and len(toks) == 2:
                 self.skipping = False
             else:
-                if first == "end":
+                if first == "end" and len(toks) == 2 and toks[1][1] == self.skipping:
                     self.skipping = False
                 return
         if self.cur is None:
@@ -400,17 +399,12 @@ class Session:
                        "steps look like `LABEL: NAME = ...`, `LABEL: give ...`, `LABEL: check ...` or `LABEL: do ...`"])
         if u.steps:
             raise Err("E-ORDER", f"`{word}` belongs in the header, before the first step")
-        stage = HEADER_ORDER.index(word)
-        if stage < u.stage:
-            raise Err("E-ORDER", f"`{word}` must come before `{HEADER_ORDER[u.stage]}`",
-                      ["header order is: " + ", ".join(HEADER_ORDER)])
-        if word != "why" and u.why is None:
-            raise Err("E-ORDER", "a unit's first line must be `why \"...\"`",
-                      ["add a `why` line saying in plain words what the unit is for"])
-        if stage > 2 and u.ret is None:
-            raise Err("E-ORDER", f"`gives` must come before `{word}`", ["add a `gives TYPE` line first"])
+        if word in ("ensure", "example") and u.ret is None:
+            raise Err("E-ORDER", f"`gives` must come before `{word}`", ["move the `gives TYPE` line above this one"])
+        if word == "takes" and (u.examples or u.requires or u.ensures or u.shrinks):
+            raise Err("E-ORDER", "`takes` lines come before `shrinks`, `require`, `ensure` and `example`",
+                      ["move this line up, next to the other `takes` lines"])
         getattr(self, "_h_" + word)(c, toks)
-        u.stage = stage
 
     def _h_why(self, c: Cur, toks: list):
         u = self.cur
@@ -463,14 +457,22 @@ class Session:
 
     def _h_shrinks(self, c: Cur, toks: list):
         u = self.cur
-        name = _plain_name(c.next(), "an input name after `shrinks`")
+        kind, path = c.next()
         c.end("after `shrinks`")
-        t = dict(u.params).get(name)
+        head, *fields = str(path).split(".")
+        t = dict(u.params).get(head) if kind == "name" else None
         if t is None:
-            raise Err("E-NAME", f"`{name}` is not an input of this unit", [f"inputs are: {', '.join(n for n, _ in u.params) or '(none)'}"])
+            raise Err("E-NAME", f"`{head}` is not an input of this unit",
+                      [f"inputs are: {', '.join(n for n, _ in u.params) or '(none)'}"])
+        for f in fields:
+            ft = self._field(t, f)
+            if ft is None:
+                raise Err("E-NAME", f"`{T.show(t)}` has no field `{f}`", self._field_fix(t))
+            t = ft
         if t != T.INT and t != T.TEXT and t[0] != "seq":
-            raise Err("E-TYPE", f"`shrinks` needs an int, text or seq input; `{name}` is `{T.show(t)}`")
-        u.shrinks = name
+            raise Err("E-TYPE", f"`shrinks` needs an int, text or seq; `{path}` is `{T.show(t)}`",
+                      ["name an int, text or seq input, or a field of a record input: `shrinks INPUT.FIELD`"])
+        u.shrinks = path
 
     def _h_require(self, c: Cur, toks: list):
         expr = self._condition(c, allow_result=False)
@@ -510,7 +512,7 @@ class Session:
 
     def _condition(self, c: Cur, allow_result: bool, subst: Optional[dict] = None, stop: tuple = ()) -> tuple:
         """`VALUE` or `VALUE COMPARISON VALUE`, of type bool."""
-        subst = {} if subst is None else subst
+        subst = self.cur.subst if subst is None else subst
         if self.nested:
             self._allow_result = allow_result
             e, t = self._expr(c, subst, stop, 0)
@@ -550,8 +552,8 @@ class Session:
 
     def _step_line(self, toks: list):
         u = self.cur
-        if u.why is None or u.ret is None:
-            raise Err("E-ORDER", "the header needs `why` and `gives` lines before the first step")
+        if u.ret is None:
+            raise Err("E-ORDER", "the header needs a `gives TYPE` line before the first step")
         if u.done:
             raise Err("E-UNREACHABLE", "nothing can run after an unconditional `give`", [f"write `end {u.name}`"])
         label = toks[0][1]
@@ -571,7 +573,7 @@ class Session:
             u.steps.append(Step(label, "check", self.lineno, expr=expr, code=" ".join(_tok(t) for t in toks[3:])))
         elif word == "do":
             c.next()
-            subst = {}
+            subst = u.subst
             expr, t, fallible = self._simple(c, subst, stop=("else",))
             self._unify(t, T.NOTHING, subst, "`do`",
                         fixes=[f"this gives a `{T.show(T.resolve(t, subst))}`; bind it: `{label}: NAME = ...`"])
@@ -583,7 +585,7 @@ class Session:
 
     def _give(self, c: Cur, label: str):
         u = self.cur
-        subst = {}
+        subst = u.subst
         if c.accept("fault"):
             kind, code = c.next()
             if kind != "string":
@@ -621,7 +623,7 @@ class Session:
             self._check_type(declared)
         c.expect("=", f"after `{name}`")
         self._new_name(name)
-        subst = {}
+        subst = u.subst
         if c.is_word("match"):
             c.next()
             atom, at = self._atom(c, subst)
@@ -636,13 +638,7 @@ class Session:
             return
         if c.is_word("when") and not self.nested:
             c.next()
-            cond = self._condition(c, False, subst, stop=("then",))
-            c.expect("then", "after the `when` condition")
-            a, at, af = self._simple(c, subst, stop=("else",))
-            c.expect("else", "after the `then` value")
-            b, bt, bf = self._simple(c, subst, stop=("else",))
-            self._unify(bt, at, subst, "`else` value")
-            expr, t, fallible = ("when", cond, a, b), at, af or bf
+            expr, t, fallible = self._when_chain(c, subst)
         else:
             expr, t, fallible = self._simple(c, subst, stop=("else",))
         if declared is not None:
@@ -653,11 +649,22 @@ class Session:
         u.scope[name] = t
         u.steps.append(Step(label, "bind", self.lineno, name=name, expr=expr, type=t, handler=handler))
 
+    def _when_chain(self, c: Cur, subst: dict):
+        """Flat variant: `when C then A else B`, where B may itself be another `when ...`."""
+        cond = self._condition(c, False, subst, stop=("then",))
+        c.expect("then", "after the `when` condition")
+        a, at, af = self._simple(c, subst, stop=("else",))
+        c.expect("else", "after the `then` value")
+        if c.accept("when"):
+            b, bt, bf = self._when_chain(c, subst)
+        else:
+            b, bt, bf = self._simple(c, subst, stop=("else",))
+        self._unify(bt, at, subst, "`else` value")
+        return ("when", cond, a, b), at, af or bf
+
     def _settle(self, t: tuple, subst: dict, name: str) -> tuple:
+        """A type may stay partly unknown here; later steps can pin it down. Checked when the unit closes."""
         t = T.resolve(t, subst)
-        if T.has_var(t):
-            raise Err("E-AMBIG", f"the type of `{name}` cannot be worked out from this line alone (`{T.show(t)}`)",
-                      [f"state it: `{name} : TYPE = ...`, for example `{name} : seq of int = []`"])
         self._check_type(t)
         return t
 
@@ -683,7 +690,11 @@ class Session:
             u.scope[binder] = T.resolve(payload, subst)
         try:
             c.expect("then", f"in `{want}`")
-            expr, t, fallible = self._simple(c, subst, stop=("else",))
+            if c.is_word("when") and not self.nested:
+                c.next()
+                expr, t, fallible = self._when_chain(c, subst)
+            else:
+                expr, t, fallible = self._simple(c, subst, stop=("else",))
             self._unify(t, p["result"], subst, f"case `{case}`")
             handler = self._handler(c, subst, t, fallible)
             c.end("after the case")
@@ -724,7 +735,9 @@ class Session:
             if not u.fallible:
                 raise Err("E-FAULT", "this unit cannot fault, so it cannot pass a fault on",
                           ["change the header to `gives TYPE or fault`", "or use a fallback: `else VALUE`"])
-            return ("give_fault",)
+            if c.peek()[0] == "string":
+                return ("give_fault", c.next()[1])
+            return ("give_fault", None)
         atom, at = self._atom(c, subst)
         self._unify(at, t, subst, "`else` fallback")
         return ("default", atom)
@@ -776,7 +789,7 @@ class Session:
             if val in KEYWORDS:
                 raise Err("E-SYNTAX", f"expected a value, found keyword `{val}`")
             head, *path = val.split(".")
-            if head in u.scope:
+            if head in u.scope and val not in BUILTINS:
                 atom, t = ("name", head), u.scope[head]
                 for f in path:
                     t = T.resolve(t, subst)
@@ -905,9 +918,18 @@ class Session:
                 b, bt = self._expr(c, subst, stop + ("else",), 0)
                 self._unify(bt, at, subst, "`else` value")
                 return ("when", cond, a, b), at, False
-            if val == "new":
+            if val == "new" and "new" not in u.scope:
                 c.next()
                 return self._new(c, subst)
+            if val == "give":
+                c.next()
+                c.expect("fault", "after `give` (only `give fault \"CODE\"` may be used as a value)")
+                kind2, code = c.next()
+                if kind2 != "string":
+                    raise Err("E-SYNTAX", "`give fault` is followed by a code in double quotes")
+                if not u.fallible:
+                    raise Err("E-FAULT", "this unit cannot fault", ["change the header to `gives TYPE or fault`"])
+                return ("raise", code), T.fresh(), False
             if val == "repeat":
                 c.next()
                 return self._repeat(c, subst)
@@ -915,7 +937,7 @@ class Session:
                 raise Err("E-SYNTAX", f"`{val}` cannot be nested inside another `when` or `match`",
                           ["move it into its own unit and call that unit here"])
             head = val.split(".")[0]
-            if head not in u.scope:
+            if head not in u.scope or val in BUILTINS:
                 if val in BUILTINS and (BUILTINS[val].params or BUILTINS[val].effect or BUILTINS[val].fallible):
                     c.next()
                     return self._call_builtin(c, subst, BUILTINS[val], stop)
@@ -1115,6 +1137,13 @@ class Session:
                       [f"change the header to `needs {keep}`" if keep else "remove the `needs` line"])
         if u.shrinks and not u.calls_self:
             raise Err("E-SHRINKS", "`shrinks` is only for units that call themselves", ["remove the `shrinks` line"])
+        for st in u.steps:
+            if st.type is not None:
+                st.type = T.resolve(st.type, u.subst)
+                if T.has_var(st.type):
+                    raise Err("E-AMBIG", f"the type of `{st.name}` (step {st.label}) cannot be worked out: `{T.show(st.type)}`",
+                              [f"state it: `{st.name} : TYPE = ...`, for example `{st.name} : seq of int = []`"])
+                self._check_type(st.type)
         u.hash = self._hash(u)
         if self.run_examples and u.examples:
             self._run_examples(u)
@@ -1160,6 +1189,18 @@ class Session:
         return h.hexdigest()[:12]
 
 
+def _logical(source: str) -> list:
+    """[(line number, text)], with lines that start with `else` or `then` joined to the line before."""
+    out = []
+    for no, text in enumerate(source.splitlines(), 1):
+        first = text.strip().split(" ", 1)[0]
+        if first in ("else", "then") and out and out[-1][1].strip():
+            out[-1] = (out[-1][0], out[-1][1].split(" --")[0] + " " + text.strip())
+        else:
+            out.append((no, text))
+    return out
+
+
 def _ordered(lines: list) -> list:
     """Order whole definitions so that each comes after the definitions it mentions.
 
@@ -1167,7 +1208,7 @@ def _ordered(lines: list) -> list:
     Returns [(line number, text)]. Definitions in a cycle keep their written order.
     """
     chunks, current = [], None           # chunk: [name, [(lineno, text)], mentioned names]
-    for no, text in enumerate(lines, 1):
+    for no, text in lines:
         try:
             toks = lex(text)
         except LexError:
@@ -1206,7 +1247,7 @@ def _ordered(lines: list) -> list:
 def check_source(source: str, run_examples: bool = True, nested: bool = False) -> Session:
     s = Session(run_examples=run_examples, nested=nested)
     last = 0
-    for no, text in _ordered(source.splitlines()):
+    for no, text in _ordered(_logical(source)):
         s.feed(text, no)
         last = max(last, no)
     s.lineno = last

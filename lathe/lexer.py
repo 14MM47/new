@@ -6,9 +6,8 @@ import re
 # Words that can never be used as names. Header words (why, takes, gives, ...) and
 # `result` are only special in their own position, so they stay usable as names.
 KEYWORDS = {
-    "record", "choice", "unit", "end", "give", "check", "do", "when", "then", "else",
-    "match", "on", "with", "new", "repeat", "limit", "fault", "or", "and", "not",
-    "true", "false", "nothing",
+    "record", "choice", "unit", "give", "check", "do", "when", "then", "else",
+    "match", "on", "with", "repeat", "fault", "or", "and", "not", "true", "false", "nothing",
 }
 
 BINOPS = {"+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "and", "or"}

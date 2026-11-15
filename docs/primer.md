@@ -8,11 +8,11 @@ it a value. Comments start with `--`. Indentation is free.
 
 ```
 unit NAME
-  why "plain words: what this unit is for"
+  why "plain words: what this unit is for"     -- optional
   takes NAME : TYPE            -- one line per input, zero or more
   gives TYPE                   -- or: gives TYPE or fault
   needs EFFECT, EFFECT         -- only if it uses effects
-  shrinks INPUT                -- only if the unit calls itself
+  shrinks INPUT                -- only if the unit calls itself; may be INPUT.FIELD
   require CONDITION            -- must hold on entry
   ensure CONDITION             -- must hold for `result`
   example INPUTS gives VALUE   -- literals only; the checker runs it
@@ -20,8 +20,8 @@ unit NAME
 end NAME
 ```
 
-Header lines must come in exactly this order. `why` and `gives` are required.
-Every step line starts with a label (`s0:`, `s1:`, ...).
+Keep header lines in this order. `gives` is required. Every step line starts
+with a label (`s0:`, `s1:`, ...).
 
 ## Steps
 
@@ -62,9 +62,15 @@ RIGHT  s0: pa = a > 0
        s3: two = pa and pb
        s4: ok = two and pc
 
-WRONG  s0: x = when a then 1 else when b then 2 else 3     -- no nested `when`
-RIGHT  s0: inner = when b then 2 else 3
-       s1: x = when a then 1 else inner
+```
+
+A `when` may be chained with `else when`, and a line that starts with `else`
+continues the line above it:
+
+```
+s0: size = when n > 100 then "big"
+           else when n > 10 then "medium"
+           else "small"
 ```
 <!-- /flat -->
 <!-- nested -->
@@ -88,15 +94,16 @@ s9: give big + 1                      -- the last step is always an unconditiona
 ```
 
 Calls bind tighter than operators: `f a + 1` means `(f a) + 1`. Never write
-`f(a, b)`; write `f a b`.
+`f(a, b)`; write `f a b`. A line that starts with `else` continues the line
+above it, so a long `when ... then ... else when ...` chain can span lines.
 <!-- /nested -->
 
 A name is given a value once and never changed. Equality is `==`. `/` rounds
 down. Dividing by zero or overflowing 64 bits stops the program. Join text with
 `text.concat a b` or `text.join [a, b, c] ""`, not `+`.
 
-Reserved words, never usable as names: `record choice unit end give check do when
-then else match on with new repeat limit fault or and not true false nothing`.
+Reserved words, never usable as names: `record choice unit give check do when
+then else match on with repeat fault or and not true false nothing`.
 
 ## Types
 
@@ -164,7 +171,11 @@ An operation marked `or fault` can fail, and the step must say what then:
 ```
 s0: n = int.parse t else give fault    -- pass it to the caller; header needs `gives T or fault`
 s1: n = int.parse t else 0             -- or use a fallback value
-s2: give fault "empty" when len == 0   -- raise your own
+s2: n = int.parse t else give fault "bad number"   -- pass it on under a new code
+s3: give fault "empty" when len == 0   -- raise your own
+s4: v = match first
+    on some x then x
+    on none then give fault "empty"    -- `give fault "CODE"` may stand where a branch value goes
 ```
 
 ## Effects

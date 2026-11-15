@@ -1,0 +1,71 @@
+-- reverse Polish calculator: faults travel through a fold (one operation per step)
+unit apply_op
+  why "apply + - or * to two numbers"
+  takes op : text
+  takes a : int
+  takes b : int
+  gives int
+  example "-" 10 3 gives 7
+  s0: sum = a + b
+  s1: diff = a - b
+  s2: prod = a * b
+  s3: r1 = when op == "+" then sum else prod
+  s4: r2 = when op == "-" then diff else r1
+  s5: give r2
+end apply_op
+
+unit push_number
+  why "read a token as a number and push it"
+  takes stack : seq of int
+  takes tok : text
+  gives seq of int or fault
+  s0: n = int.parse tok else give fault
+  s1: out = seq.append stack n
+  s2: give out
+end push_number
+
+unit apply_to_stack
+  why "pop two values, apply the operator, push the result"
+  takes stack : seq of int
+  takes tok : text
+  gives seq of int or fault
+  s0: n = seq.length stack
+  s1: give fault "underflow" when n < 2
+  s2: ia = n - 2
+  s3: ib = n - 1
+  s4: rest = seq.take stack ia
+  s5: ma = seq.at stack ia
+  s6: mb = seq.at stack ib
+  s7: a = maybe.or ma 0
+  s8: b = maybe.or mb 0
+  s9: v = apply_op tok a b
+  s10: out = seq.append rest v
+  s11: give out
+end apply_to_stack
+
+unit rpn_step
+  why "process one token against the stack"
+  takes stack : seq of int
+  takes tok : text
+  gives seq of int or fault
+  s0: is_op = seq.contains ["+", "-", "*"] tok
+  s1: out = when is_op then apply_to_stack stack tok else push_number stack tok else give fault
+  s2: give out
+end rpn_step
+
+unit eval_rpn
+  why "evaluate a reverse Polish calculation"
+  takes tokens : seq of text
+  gives int or fault
+  example ["2", "3", "+"] gives 5
+  example ["1", "+"] gives fault "underflow"
+  example ["2", "x", "+"] gives fault "parse"
+  example ["1", "2"] gives fault "leftover"
+  s0: empty : seq of int = []
+  s1: final = seq.fold tokens empty with rpn_step else give fault
+  s2: n = seq.length final
+  s3: give fault "leftover" when n != 1
+  s4: top = seq.first final
+  s5: v = maybe.or top 0
+  s6: give v
+end eval_rpn

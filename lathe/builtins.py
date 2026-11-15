@@ -17,9 +17,10 @@ INT_MIN, INT_MAX = -(2**63), 2**63 - 1
 class Fault(Exception):
     """An expected failure. Part of a unit's type; the caller must handle it."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, given: bool = False):
         super().__init__(code)
         self.code = code
+        self.given = given      # raised by the unit's own `give fault`: step fallbacks must not swallow it
 
 
 class Trap(Exception):

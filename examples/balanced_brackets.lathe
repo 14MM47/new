@@ -1,0 +1,67 @@
+-- are the brackets in a text properly nested? (one operation per step)
+record scan
+  stack : seq of text
+  ok : bool
+end scan
+
+unit opener_for
+  why "the opening bracket that a closing bracket pairs with, or empty text for anything else"
+  takes c : text
+  gives text
+  example ")" gives "("
+  example "x" gives ""
+  s0: a = when c == ")" then "(" else ""
+  s1: b = when c == "]" then "[" else a
+  s2: d = when c == "}" then "{" else b
+  s3: give d
+end opener_for
+
+unit pop_if_match
+  why "pop the stack if its top is the wanted opener, otherwise mark the scan as failed"
+  takes st : scan
+  takes want : text
+  gives scan
+  s0: n = seq.length st.stack
+  s1: last = seq.last st.stack
+  s2: top = maybe.or last ""
+  s3: keep = n - 1
+  s4: rest = seq.take st.stack keep
+  s5: popped = new scan stack = rest, ok = st.ok
+  s6: failed = new scan stack = st.stack, ok = false
+  s7: out = when top == want then popped else failed
+  s8: give out
+end pop_if_match
+
+unit scan_char
+  why "advance the bracket scan by one character"
+  takes st : scan
+  takes c : text
+  gives scan
+  s0: is_open = seq.contains ["(", "[", "{"] c
+  s1: pushed_stack = seq.append st.stack c
+  s2: pushed = new scan stack = pushed_stack, ok = st.ok
+  s3: want = opener_for c
+  s4: closed = pop_if_match st want
+  s5: after_close = when want != "" then closed else st
+  s6: out = when is_open then pushed else after_close
+  s7: give out
+end scan_char
+
+unit balanced_brackets
+  why "is every bracket properly opened, closed and nested"
+  takes t : text
+  gives bool
+  example "([]{})" gives true
+  example "(]" gives false
+  example "((" gives false
+  example ")(" gives false
+  example "" gives true
+  s0: empty : seq of text = []
+  s1: start = new scan stack = empty, ok = true
+  s2: chars = text.chars t
+  s3: final = seq.fold chars start with scan_char
+  s4: left = seq.length final.stack
+  s5: none_left = left == 0
+  s6: out = final.ok and none_left
+  s7: give out
+end balanced_brackets

@@ -153,6 +153,9 @@ class Accepts(unittest.TestCase):
 
     def test_empty_literal_needs_annotation(self):
         self.assertEqual(codes(unit("s0: xs = []\ns1: give n")), ["E-AMBIG"])
+        # a later step may pin the type down
+        self.assertEqual(codes(unit("s0: xs = []\ns1: ys = seq.append xs n\ns2: m = seq.length ys\ns3: give m")), [])
+        self.assertEqual(codes(unit('s0: m = map.empty\ns1: m2 = map.put m "a" n\ns2: k = map.size m2\ns3: give k')), [])
         self.assertEqual(codes(unit("s0: xs : seq of int = []\ns1: m = seq.length xs\ns2: give m")), [])
         self.assertEqual(codes(unit("s0: m : map of text to int = map.empty\ns1: k = map.size m\ns2: give k")), [])
 
@@ -306,9 +309,11 @@ end g
         self.assertEqual(codes(unit("s0: h = seq.first xs\ns1: v = match h\n  on some x then x\ns2: give v", base)), ["E-ARMS"])
         self.assertEqual(codes(unit("s0: h = seq.first xs\ns1: v = match h\n  on some then 1\n  on none then 0\ns2: give v", base)), ["E-ARMS"])
 
-    def test_header_order_and_why(self):
-        self.assertEqual(codes("unit f\n  takes n : int\n  gives int\n  s0: give n\nend f"), ["E-ORDER"])
-        self.assertEqual(codes('unit f\n  why "x"\n  gives int\n  takes n : int\n  s0: give 1\nend f'), ["E-ORDER"])
+    def test_header_rules(self):
+        self.assertEqual(codes("unit f\n  takes n : int\n  gives int\n  s0: give n\nend f"), [])   # `why` is optional
+        self.assertEqual(codes('unit f\n  why "x"\n  example 1 gives 1\n  takes n : int\n  gives int\n  s0: give 1\nend f'), ["E-ORDER"])
+        self.assertEqual(codes('unit f\n  gives int\n  example 1 gives 1\n  takes n : int\n  s0: give 1\nend f'), ["E-ARITY"])
+        self.assertEqual(codes('unit f\n  takes n : int\n  s0: give n\nend f'), ["E-ORDER"])
 
     def test_example_failure_reports_actual(self):
         v = check(unit("s0: m = n + 1\ns1: give m", "takes n : int\n  gives int\n  example 1 gives 3")).verdicts[0]
@@ -502,7 +507,8 @@ class Variants(unittest.TestCase):
 
     def test_header_words_and_result_are_usable_names(self):
         self.assertEqual(codes(unit("s0: result = n + 1\ns1: gives = result * 2\ns2: give gives")), [])
-        v = check(unit("s0: limit = n + 1\ns1: give limit")).verdicts[0]
+        self.assertEqual(codes(unit("s0: limit = n + 1\ns1: new = limit * 2\ns2: end = new - 1\ns3: give end")), [])
+        v = check(unit("s0: match = n + 1\ns1: give match")).verdicts[0]
         self.assertIn("reserved word", v.message)
 
     def test_flat_rejects_parentheses(self):
@@ -547,3 +553,101 @@ class Primer(unittest.TestCase):
         self.assertIn("no parentheses", primer_text(False))
         self.assertNotIn("no parentheses", primer_text(True))
         self.assertNotIn("<!--", primer_text(False) + primer_text(True))
+
+
+class Examples(unittest.TestCase):
+    def test_every_example_program_checks(self):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+        names = sorted(n for n in os.listdir(root) if n.endswith(".lathe"))
+        self.assertGreaterEqual(len(names), 3)
+        for name in names:
+            with open(os.path.join(root, name), encoding="utf-8") as fh:
+                s = check_source(fh.read())
+            self.assertEqual([v.render() for v in s.verdicts], [], name)
+
+
+class Friction(unittest.TestCase):
+    """Behaviour added after the first measurement run."""
+
+    def test_local_names_may_shadow_namespaces(self):
+        src = unit("s0: n = text.length text\ns1: pair = pair.make n text\ns2: give pair.first",
+                   'takes text : text\n  gives int\n  example "abc" gives 3')
+        self.assertEqual(codes(src), [])
+
+    def test_else_when_chain_and_continuation_lines(self):
+        src = unit("""
+            s0: r = n % 3
+            s1: word = when r == 0 then "zero"
+                       else when r == 1 then "one"
+                       else "two"
+            s2: give word
+        """, 'takes n : int\n  gives text\n  example 3 gives "zero"\n  example 4 gives "one"\n  example 5 gives "two"')
+        self.assertEqual(codes(src), [])
+
+    def test_give_fault_as_a_branch(self):
+        src = unit("""
+            s0: first = seq.first xs
+            s1: v = match first
+                on some x then x * 2
+                on none then give fault "empty"
+            s2: w = when v > 100 then give fault "big" else v
+            s3: give w
+        """, 'takes xs : seq of int\n  gives int or fault\n  example [4] gives 8\n  example [] gives fault "empty"\n  example [99] gives fault "big"')
+        self.assertEqual(codes(src), [])
+
+    def test_own_fault_is_not_swallowed_by_a_fallback(self):
+        src = unit("""
+            s0: v = when t == "" then give fault "empty" else int.parse t else -1
+            s1: give v
+        """, 'takes t : text\n  gives int or fault\n  example "7" gives 7\n  example "x" gives -1\n  example "" gives fault "empty"')
+        self.assertEqual(codes(src), [])
+
+    def test_else_give_fault_with_a_new_code(self):
+        src = unit('s0: v = int.parse t else give fault "not a number"\ns1: give v',
+                   'takes t : text\n  gives int or fault\n  example "x" gives fault "not a number"')
+        self.assertEqual(codes(src), [])
+
+    def test_shrinks_on_a_field(self):
+        src = """
+        record job
+          left : seq of int
+          total : int
+        end job
+        unit drain
+          takes j : job
+          gives int
+          shrinks j.left
+          s0: give j.total when seq.is_empty j.left
+          s1: rest = seq.drop j.left 1
+          s2: head = seq.first j.left
+          s3: x = maybe.or head 0
+          s4: sum = j.total + x
+          s5: next = new job left = rest, total = sum
+          s6: out = drain next
+          s7: give out
+        end drain
+        """
+        s = check_source(textwrap.dedent(src), nested=True)
+        self.assertEqual([v.render() for v in s.verdicts], [])
+        self.assertEqual(Interp(s.prog, Runtime.sealed()).call("drain", [{"left": [1, 2, 3], "total": 0}]), 6)
+
+    def test_stray_lines_and_nested_definitions_give_one_verdict(self):
+        src = """
+        unit f
+          takes n : int
+          gives int
+          record inner
+            a : int
+          end inner
+          s0: m = n + 1
+          s1: give m
+        end f
+        unit g
+          gives int
+          s0: give 1
+        end g
+        """
+        s = check(src)
+        self.assertEqual([v.code for v in s.verdicts], ["E-END"])
+        self.assertEqual(list(s.prog.units), ["g"])
+        self.assertEqual(codes("s0: x = 1\ns1: y = 2\nunit g\n  gives int\n  s0: give 1\nend g"), ["E-SYNTAX"])

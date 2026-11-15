@@ -228,7 +228,10 @@ class Interp:
         env = {pn: v for (pn, _), v in zip(u.params, args)}
         stack = None
         if u.shrinks:
-            m = env[u.shrinks]
+            head, *fields = u.shrinks.split(".")
+            m = env[head]
+            for f in fields:
+                m = m[f]
             m = m if isinstance(m, int) else len(m)
             stack = self.measures.setdefault(name, [])
             if stack and not (0 <= m < stack[-1]):
@@ -257,6 +260,9 @@ class Interp:
                 if done:
                     return value
             raise AssertionError("checked unit fell off its end")
+        except Fault as f:
+            f.given = False         # outside this unit it is an ordinary fault again
+            raise
         finally:
             self.depth -= 1
             if stack is not None:
@@ -286,8 +292,12 @@ class Interp:
     def guarded(self, e: tuple, env: dict, handler: Optional[tuple]):
         try:
             return self.expr(e, env)
-        except Fault:
-            if handler is None or handler[0] == "give_fault":
+        except Fault as f:
+            if handler is None or f.given:
+                raise
+            if handler[0] == "give_fault":
+                if handler[1] is not None:
+                    raise Fault(handler[1])
                 raise
             return self.atom(handler[1], env)
 
@@ -304,6 +314,8 @@ class Interp:
             return self.binop(e[1], self.atom(e[2], env), self.atom(e[3], env))
         if k == "not":
             return not self.atom(e[1], env)
+        if k == "raise":
+            raise Fault(e[1], given=True)
         if k == "builtin":
             b = BUILTINS[e[1]]
             args = [self.atom(a, env) for a in e[2]]
