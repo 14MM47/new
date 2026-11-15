@@ -536,7 +536,7 @@ class Primer(unittest.TestCase):
         import re
         for nested in (False, True):
             text = primer_text(nested)
-            blocks = [b for b in re.findall(r"```\n(.*?)```", text, re.S) if re.match(r"(record|choice|unit) \w+\n  ", b)]
+            blocks = [b for b in re.findall(r"```\n(.*?)```", text, re.S) if re.match(r"(record|choice|unit) [a-z_]+\n  ", b)]
             self.assertGreaterEqual(len(blocks), 2)
             for block in blocks:
                 s = check_source(block, nested=nested)
