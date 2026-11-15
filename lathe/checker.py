@@ -811,6 +811,10 @@ class Session:
                 if path[0] in cases:
                     raise Err("E-SYNTAX", f"`{val}` carries a value, so it is an operation, not a plain value",
                               ["give it a name in an earlier step, then use the name here"])
+            if val in self.prog.units or val == u.name:
+                raise Err("E-SYNTAX", f"`{val}` is a unit; calling it is an operation, not a plain value",
+                          ["give the call's result a name in its own step, then use the name here"]
+                          if not self.nested else ["put the call in parentheses"])
             self._unknown(val)
         shown = f"`{_tok((kind, val))}`" if val is not None else "the end of the line"
         raise Err("E-SYNTAX", f"expected a value, found {shown}")
@@ -1104,7 +1108,11 @@ class Session:
             if not c.accept(fname):
                 raise Err("E-FIELDS", f"fields are set in their declared order; expected `{fname}`", [f"form: `{form}`"])
             c.expect("=", f"after field `{fname}`")
-            atom, at = self._atom(c, subst)
+            if self.nested:
+                e, at = self._expr(c, subst, ("else", "then", "when", "limit"), 0)
+                atom = self._as_atom(e)
+            else:
+                atom, at = self._atom(c, subst)
             self._unify(at, ftype, subst, f"field `{fname}`")
             fields.append((fname, atom))
         return ("new", rname, fields), ("named", rname), False
@@ -1252,5 +1260,5 @@ def check_source(source: str, run_examples: bool = True, nested: bool = False) -
         last = max(last, no)
     s.lineno = last
     s.finish()
-    s.verdicts.sort(key=lambda v: v.line)
+    s.verdicts.sort(key=lambda v: (v.code == "E-BLOCKED", v.line))
     return s

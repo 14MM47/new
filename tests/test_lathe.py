@@ -651,3 +651,38 @@ class Friction(unittest.TestCase):
         self.assertEqual([v.code for v in s.verdicts], ["E-END"])
         self.assertEqual(list(s.prog.units), ["g"])
         self.assertEqual(codes("s0: x = 1\ns1: y = 2\nunit g\n  gives int\n  s0: give 1\nend g"), ["E-SYNTAX"])
+
+    def test_nested_record_fields_take_expressions(self):
+        src = """
+        record acc
+          total : int
+          rest : int
+        end acc
+        unit step
+          takes s : acc
+          gives acc
+          s0: give new acc total = s.total + s.rest % 10, rest = s.rest / 10
+        end step
+        """
+        s = check_source(textwrap.dedent(src), nested=True)
+        self.assertEqual([v.render() for v in s.verdicts], [])
+        self.assertEqual(Interp(s.prog, Runtime.sealed()).call("step", [{"total": 1, "rest": 47}]), {"total": 8, "rest": 4})
+
+    def test_real_faults_are_listed_before_blocked_ones(self):
+        src = """
+        unit top
+          gives int
+          s0: m = helper 1
+          s1: give m
+        end top
+        unit helper
+          takes n : int
+          gives int
+          s0: give nope
+        end helper
+        """
+        self.assertEqual(codes(src), ["E-NAME", "E-BLOCKED"])
+
+    def test_unit_call_as_plain_value_is_explained(self):
+        v = check(unit("s0: give f n", "takes n : int\n  gives int\n  shrinks n")).verdicts[0]
+        self.assertIn("is a unit", v.message)

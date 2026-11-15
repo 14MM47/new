@@ -21,7 +21,11 @@ the design actually helps.
 | Sandbox enforcement by the operating system | not started; grants are enforced by the interpreter only |
 | Concurrency, GPU, foreign libraries, windowing | not started |
 
-Measured results are in [`harness/results/`](harness/results/).
+Measured results are in [`harness/results/`](harness/results/README.md). In
+short: on 32 pure-function tasks a reasoning model writes correct Lathe from
+the primer alone 94% of the time on the first try, a small model about a third
+of the time, and Python is at 100% for both at under a third of the size. The
+tasks so far measure what Lathe costs, not what it is for.
 
 ## The idea in one page
 
