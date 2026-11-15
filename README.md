@@ -1,118 +1,50 @@
-# Lathe
+# A language for language models
 
-Lathe is an experimental programming language designed to be written by language
-models rather than people. This repository holds version 0: a checker, a
-reference interpreter, a primer for models, and a harness that measures whether
-the design actually helps.
+An experiment in designing a programming language for LLMs to write, driven by
+measurement rather than by taste.
 
-"Lathe" is a working name.
+## Where it stands
 
-## Status
+| Stage | What was tried | Outcome |
+|---|---|---|
+| v0, "Lathe" | A new language with its own syntax, designed from first principles | Built and measured. Models wrote it far less reliably than Python, at 3.5 times the size. Archived in [`v0/`](v0/README.md). |
+| v2 plan | A strict, confined dialect of a language models already know, base to be chosen by measurement | Planned. |
+| v2 phase 0 | Baselines for Python, TypeScript, Rust and Go on file-handling tasks with safety observation | Done. All four at ceiling on correctness and rule-following; Python about 30% smaller. See [`bench/results/`](bench/results/README.md). |
 
-| Part | State |
-|---|---|
-| Line-by-line checker with verdicts and repair hints | working |
-| Reference interpreter | working |
-| Grants, effect recording and exact replay | working |
-| Cards and plain-words search (`ask`) | working |
-| Measurement harness against a Python baseline | working |
-| Native code for x86-64 Linux | not started |
-| Proofs of claims (anything beyond running examples) | not started |
-| Sandbox enforcement by the operating system | not started; grants are enforced by the interpreter only |
-| Concurrency, GPU, foreign libraries, windowing | not started |
+The phase 0 result changes the question. On small, clearly specified programs,
+current models do not make the errors a new language would prevent, so the
+remaining case for one rests on enforced limits, larger programs and execution
+speed, none of which is measured yet.
 
-Measured results are in [`harness/results/`](harness/results/README.md). In
-short: on 32 pure-function tasks a reasoning model writes correct Lathe from
-the primer alone 94% of the time on the first try, a small model about a third
-of the time, and Python is at 100% for both at under a third of the size. The
-tasks so far measure what Lathe costs, not what it is for.
-
-## The idea in one page
-
-Every feature is meant to follow from how a model writes text, or from what a
-machine is, and to be kept only if measurement supports it.
-
-- **Checked as written.** A `Session` is fed one line at a time and each line is
-  fully checked on arrival: names, types, effects and faults. Inside a unit
-  nothing can refer forward, so every accepted prefix is valid. Whole
-  definitions may appear in any order in a file.
-- **Closed vocabulary.** A name that does not exist is rejected with the nearest
-  real names. `ask find "plain words"` searches operations by meaning.
-- **Said twice.** A unit states what it is for (`why`), what must hold
-  (`require`, `ensure`) and concrete `example`s. The checker runs the examples
-  when the unit is closed, so the steps and the claim must agree.
-- **One verdict per definition.** A verdict carries a stable code, the offending
-  line, and a short list of repairs. Units that depend on a faulty unit are
-  reported as blocked rather than producing a cascade.
-- **Faults and traps.** An expected failure is a *fault*: it is part of a unit's
-  type and every step that can fault must say what happens then. A bug is a
-  *trap*: overflow, division by zero, a failed `check`. Traps stop the run.
-- **Always terminates.** There are no unbounded loops. Repetition is a
-  whole-collection operation, a self-call with a shrinking input, or `repeat`
-  with a stated limit.
-- **No authority by default.** A unit lists the effects it needs. A run is given
-  a grant from outside the program, and the program cannot exceed it.
-- **Replayable.** Every effect passes through one gate, so a run can be recorded
-  and replayed exactly, even after the files it read are gone.
-
-Two syntax variants exist so they can be measured against each other: the
-default allows one operation per step; `--nested` allows ordinary nested
-expressions with parentheses.
-
-## Try it
-
-Python 3.11 or later, no dependencies.
+## The phase 0 benchmark
 
 ```bash
-python3 -m lathe check examples/word_count.lathe --cards
+python3 -m bench.run validate
 ```
 
 ```bash
-python3 -m lathe run examples/word_count.lathe --grant "console write" --grant "files read ." README.md
+python3 -m bench.run --models haiku --out bench/results/run.jsonl
 ```
 
 ```bash
-python3 -m lathe ask find "count how often each item occurs"
+python3 -m bench.run report bench/results/run.jsonl
 ```
 
-```bash
-python3 -m lathe primer
-```
+The model is reached through `claude -p` with tools switched off. Each generated
+program is built with its language's strict checker and run in throwaway
+workspaces under `strace`; anything it opens, writes or starts outside the rules
+is recorded as a violation. The benchmark compiles and runs model-written
+programs, so use it only where that is acceptable.
 
-```bash
-python3 -m unittest discover -s tests
-```
-
-`python3 -m lathe session` starts the line-by-line dialogue: each line you send
-is answered with `ok` or a verdict, `undo` takes back the last accepted line,
-and `ask scope`, `ask next`, `ask card NAME` and `ask find "..."` answer
-questions.
-
-## The harness
-
-```bash
-python3 -m harness.run --models openai:gpt-5.4-mini --out harness/results/run.jsonl
-```
-
-```bash
-python3 -m harness.run report harness/results/run.jsonl
-```
-
-Each task is a pure function with a plain-words specification. The same model
-is asked to solve it in each Lathe variant, given only the primer, and in Python
-as a baseline. It gets up to three attempts; after a failed attempt it sees what
-the toolchain reported or the first failing test. Model-written Python is
-executed in a subprocess, so run the harness only where that is acceptable.
-
-## Layout
+Needs: Python 3.11+, `strace`, the `claude` command line, `mypy`, Node.js with
+TypeScript and `@types/node` installed under `bench/.cache/ts`, `rustc`, and Go.
 
 | Path | Contents |
 |---|---|
-| `lathe/checker.py` | incremental checker, verdicts, definition hashing |
-| `lathe/interp.py` | reference interpreter, grants, record and replay |
-| `lathe/builtins.py` | the standard vocabulary |
-| `lathe/store.py` | cards and search |
-| `lathe/cli.py` | command line |
-| `docs/primer.md` | what a model is given to learn the language |
-| `harness/` | tasks, model callers, runner and results |
-| `tests/` | unit tests |
+| `bench/tasks.py` | task specifications, reference programs and scenarios |
+| `bench/observe.py` | workspace setup, tracing and violation rules |
+| `bench/langs.py` | strict build and run commands per language |
+| `bench/model.py` | the `claude -p` caller |
+| `bench/run.py` | runner, validation and report |
+| `bench/results/` | raw records and the write-up |
+| `v0/` | the first language, its harness and its results |
